@@ -1,0 +1,94 @@
+name: Model Regression Eval
+
+# TRIGGER: run this workflow only on pull requests that modify files
+# inside the prompts/ directory. "paths" is a list (note the dash),
+# even though it has just one item here -- YAML lists always use dashes.
+#
+# Note: "on" is quoted here because YAML 1.1 treats the bare word `on`
+# (also `off`, `yes`, `no`, `true`, `false`) as a boolean literal, not a
+# string, unless quoted. GitHub's own parser special-cases this, but
+# quoting it avoids the ambiguity for any other tool reading this file.
+"on":
+  pull_request:
+    paths:
+      - 'prompts/**'
+
+# PERMISSIONS: by default, GITHUB_TOKEN (the auto-generated credential
+# this workflow uses to talk back to GitHub's API) may be read-only,
+# depending on repo settings. Posting a PR comment is a write operation,
+# so we explicitly grant just the two permissions this workflow actually
+# needs -- nothing broader.
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  eval:
+    # RUNNER: a fresh, temporary Ubuntu Linux virtual machine.
+    runs-on: ubuntu-latest
+
+    # STEPS: a list of mini-objects, exactly the pattern from the YAML
+    # walkthrough. Each item has at least a "name" (human-readable label
+    # shown in GitHub's UI) plus either "uses" (run someone else's
+    # pre-built action) or "run" (run a shell command yourself).
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        # "uses" pulls in a reusable action from GitHub's marketplace.
+        # actions/checkout is the standard first step of almost every
+        # workflow: it copies your repo's code onto the runner machine
+        # (remember -- the runner starts completely empty).
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+        # "with" passes configuration into the action being used --
+        # here, which Python version to install on the runner.
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run eval suite (baseline v1)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python src/eval_runner.py v1
+        # ${{ secrets.ANTHROPIC_API_KEY }} pulls the encrypted secret you
+        # set in GitHub's repo settings and injects it as an environment
+        # variable for this one command -- never written to any file,
+        # never shown in logs.
+
+      - name: Run eval suite (candidate v2)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python src/eval_runner.py v2
+
+      - name: Generate diff report
+        run: python src/diff_runs.py v1 v2 | tee diff_output.txt
+        # "tee" prints output to the console AND saves it to a file --
+        # we need the file for the next step, but still want to see it
+        # live in the Actions log too.
+
+      - name: Post PR comment with results
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const diffOutput = fs.readFileSync('diff_output.txt', 'utf8');
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `### Model Regression Eval Results\n\`\`\`\n${diffOutput}\n\`\`\``
+            });
+
+      - name: Block merge on critical regression
+        run: |
+          if grep -q "CRITICAL" diff_output.txt; then
+            echo "Critical regression detected -- failing this check to block merge."
+            exit 1
+          fi
+        # A non-zero exit code from any step fails the whole job, which
+        # GitHub shows as a red X on the PR. If branch protection rules
+        # require this check to pass, the PR literally cannot be merged
+        # until it's fixed -- this is the actual enforcement mechanism.
