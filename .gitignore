@@ -6,3 +6,4 @@ venv/
 *.db
 reports/*.html
 .vscode
+.DS_Store
